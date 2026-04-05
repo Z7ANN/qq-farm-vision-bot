@@ -206,7 +206,7 @@ class PlantStrategy(BaseStrategy):
 
     def _buy_seeds(self, rect: tuple, crop_name: str,
                    buy_qty: int) -> str | None:
-        """购买种子流程：打开商店 → 用 shop_xx 模板匹配找种子 → 点击 → 确认购买"""
+        """购买种子流程：打开商店 → 用 shop_xx 模板匹配找种子 → 点击 → 点确定（系统自动匹配数量）"""
         logger.info("购买流程: 打开商店")
         if self.stopped:
             return None
@@ -259,7 +259,7 @@ class PlantStrategy(BaseStrategy):
 
     def _confirm_purchase(self, rect: tuple, crop_name: str,
                           buy_qty: int) -> str | None:
-        """购买确认：点加号设置数量 → 点确定"""
+        """购买确认：直接点确定（系统自动匹配数量）"""
         for attempt in range(5):
             if self.stopped:
                 return None
@@ -269,33 +269,19 @@ class PlantStrategy(BaseStrategy):
 
             scene = identify_scene(dets, self.cv_detector, cv_img)
             if scene == Scene.BUY_CONFIRM:
-                if buy_qty > 1:
-                    max_btn = self.find_by_name(dets, "btn_buy_max")
-                    if max_btn and self.action_executor:
-                        clicks = buy_qty - 1
-                        logger.info(f"购买流程: 点击加号 {clicks} 次")
-                        abs_x, abs_y = self.action_executor.relative_to_absolute(
-                            max_btn.x, max_btn.y)
-                        for _ in range(clicks):
-                            if self.stopped:
-                                return None
-                            pyautogui.click(abs_x, abs_y)
-                            time.sleep(0.1)
-                        time.sleep(0.3)  # 等待数量更新
-
                 confirm = self.find_by_name(dets, "btn_buy_confirm")
                 if confirm:
-                    self.click(confirm.x, confirm.y, f"确定购买{crop_name}×{buy_qty}")
-                    time.sleep(0.3)  # 等待购买完成动画
+                    self.click(confirm.x, confirm.y, f"确定购买{crop_name}")
+                    time.sleep(0.3)
                     self._close_shop(rect)
-                    return f"购买{crop_name}×{buy_qty}"
+                    return f"购买{crop_name}"
 
             elif scene == Scene.POPUP:
                 from core.strategies.popup import PopupStrategy
                 ps = PopupStrategy(self.cv_detector)
                 ps.action_executor = self.action_executor
                 ps.handle_popup(dets)
-                time.sleep(0.3)  # 等待弹窗关闭
+                time.sleep(0.3)
                 continue
 
             logger.info(f"购买流程: 等待购买弹窗 ({attempt+1}/5)")

@@ -49,9 +49,8 @@ class ScreenshotConfig(BaseModel):
 
 
 class ScheduleConfig(BaseModel):
-    farm_check_minutes: int = 1
-    friend_check_minutes: int = 30
-    task_check_minutes: int = 60
+    farm_check_minutes: int = 3  # 统一检查间隔（农场+好友）
+    task_check_minutes: int = 60  # 保留但未使用
 
 
 class PlantingConfig(BaseModel):

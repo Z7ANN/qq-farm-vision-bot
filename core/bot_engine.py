@@ -41,19 +41,13 @@ class BotWorker(QThread):
     finished = pyqtSignal(dict)
     error = pyqtSignal(str)
 
-    def __init__(self, engine: "BotEngine", task_type: str = "farm"):
+    def __init__(self, engine: "BotEngine"):
         super().__init__()
         self.engine = engine
-        self.task_type = task_type
 
     def run(self):
         try:
-            if self.task_type == "farm":
-                result = self.engine.check_farm()
-            elif self.task_type == "friend":
-                result = self.engine.check_friends()
-            else:
-                result = {"success": False, "message": "未知任务类型"}
+            result = self.engine.check_all()
             self.finished.emit(result)
         except Exception as e:
             logger.exception(f"任务执行异常: {e}")
@@ -97,8 +91,7 @@ class BotEngine(QObject):
         self._worker: BotWorker | None = None
         self._is_busy = False
 
-        self.scheduler.farm_check_triggered.connect(self._on_farm_check)
-        self.scheduler.friend_check_triggered.connect(self._on_friend_check)
+        self.scheduler.check_triggered.connect(self._on_check)
         self.scheduler.state_changed.connect(self.state_changed.emit)
         self.scheduler.stats_updated.connect(self.stats_updated.emit)
 
@@ -115,12 +108,11 @@ class BotEngine(QObject):
         self.task.sell_config = config.sell
 
     def _resolve_crop_name(self) -> str:
-        """根据策略决定种植作物"""
+        """根据策略决定种植作物（静默，不输出日志）"""
         planting = self.config.planting
         if planting.strategy == PlantMode.BEST_EXP_RATE:
             best = get_best_crop_for_level(planting.player_level)
             if best:
-                logger.info(f"策略选择: {best[0]} (经验效率 {best[4]/best[3]:.4f}/秒)")
                 return best[0]
         return planting.preferred_crop
 
@@ -170,53 +162,59 @@ class BotEngine(QObject):
         self._init_strategies()
 
         farm_ms = self.config.schedule.farm_check_minutes * 60 * 1000
-        friend_ms = self.config.schedule.friend_check_minutes * 60 * 1000
-        self.scheduler.start(farm_ms, friend_ms)
+        self.scheduler.start(farm_ms)
         self.log_message.emit(f"Bot已启动 - 窗口: {window.title} | 模板: {tpl_count}个")
         return True
 
     def stop(self):
+        # 立即设置停止标志
         for s in self._strategies:
             s._stop_requested = True
+        
+        # 停止调度器
         self.scheduler.stop()
+        
+        # 等待工作线程完成（最多3秒）
         if self._worker and self._worker.isRunning():
+            logger.info("等待当前操作完成...")
             self._worker.quit()
-            self._worker.wait(3000)
+            if not self._worker.wait(3000):
+                logger.warning("工作线程未在3秒内结束，强制终止")
+                self._worker.terminate()
+                self._worker.wait(1000)
+        
         self._is_busy = False
+        
+        # 重置停止标志
         for s in self._strategies:
             s._stop_requested = False
+        
         self.log_message.emit("Bot已停止")
 
     def pause(self):
+        logger.info("暂停Bot...")
         for s in self._strategies:
             s._stop_requested = True
         self.scheduler.pause()
+        self.log_message.emit("Bot已暂停")
 
     def resume(self):
+        logger.info("恢复Bot...")
         for s in self._strategies:
             s._stop_requested = False
         self.scheduler.resume()
+        self.log_message.emit("Bot已恢复")
 
     def run_once(self):
-        self._on_farm_check()
+        self._on_check()
 
-    def _on_farm_check(self):
+    def _on_check(self):
+        """统一检查入口：农场 + 好友"""
         if self._is_busy:
             logger.debug("上一轮操作尚未完成，跳过")
             return
         self._is_busy = True
-        self._worker = BotWorker(self, "farm")
-        self._worker.finished.connect(self._on_task_finished)
-        self._worker.error.connect(self._on_task_error)
-        self._worker.start()
-
-    def _on_friend_check(self):
-        if self._is_busy:
-            return
-        if not self.config.features.auto_steal and not self.config.features.auto_help:
-            return
-        self._is_busy = True
-        self._worker = BotWorker(self, "friend")
+        self._worker = BotWorker(self)
         self._worker.finished.connect(self._on_task_finished)
         self._worker.error.connect(self._on_task_error)
         self._worker.start()
@@ -228,7 +226,7 @@ class BotEngine(QObject):
             self.log_message.emit(f"本轮完成: {', '.join(actions)}")
         next_sec = result.get("next_check_seconds", 0)
         if next_sec > 0:
-            self.scheduler.set_farm_interval(next_sec)
+            self.scheduler.set_interval(next_sec)
 
     def _on_task_error(self, error_msg: str):
         self._is_busy = False
@@ -275,7 +273,7 @@ class BotEngine(QObject):
                 if cat == "land":
                     thresh = 0.89
                 elif cat == "button":
-                    thresh = 0.8
+                    thresh = 0.7  # 临时降低阈值测试
                 else:
                     thresh = 0.8
                 detections += self.cv_detector.detect_category(cv_image, cat, threshold=thresh)
@@ -304,7 +302,45 @@ class BotEngine(QObject):
 
 
     # ============================================================
-    # 主循环
+    # 主循环 - 串行执行所有任务
+    # ============================================================
+
+    def check_all(self) -> dict:
+        """统一检查入口：农场 → 好友 → 任务
+        
+        执行顺序：
+        1. 检查自己农场（收获、维护、播种、扩建）
+        2. 检查好友农场（帮忙、偷菜）
+        3. 返回结果
+        """
+        all_actions = []
+        
+        # 1. 检查自己农场
+        logger.info("=" * 50)
+        logger.info("开始检查自己农场")
+        farm_result = self.check_farm()
+        if farm_result.get("success"):
+            all_actions.extend(farm_result.get("actions_done", []))
+        
+        # 2. 检查好友农场（如果功能开启）
+        if self.config.features.auto_help or self.config.features.auto_steal:
+            logger.info("=" * 50)
+            logger.info("开始检查好友农场")
+            friend_result = self.check_friends()
+            if friend_result.get("success"):
+                all_actions.extend(friend_result.get("actions_done", []))
+        
+        logger.info("=" * 50)
+        logger.info(f"本轮检查完成，共执行 {len(all_actions)} 项操作")
+        
+        return {
+            "success": True,
+            "actions_done": all_actions,
+            "next_check_seconds": farm_result.get("next_check_seconds", 180)
+        }
+
+    # ============================================================
+    # 农场检查
     # ============================================================
 
     def check_farm(self) -> dict:
@@ -317,6 +353,12 @@ class BotEngine(QObject):
             result["message"] = "窗口未找到"
             return result
 
+        # 检查停止信号
+        if self.popup.stopped:
+            logger.info("收到停止信号，跳过本轮检查")
+            result["success"] = True
+            return result
+
         # 清屏：点击天空区域关闭残留弹窗/菜单
         self._clear_screen(rect)
 
@@ -324,8 +366,10 @@ class BotEngine(QObject):
         max_idle = 3
 
         for round_num in range(1, 51):
+            # 每轮开始前检查停止信号
             if self.popup.stopped:
                 logger.info("收到停止/暂停信号，中断当前操作")
+                result["success"] = True
                 break
 
             cv_image, detections, _ = self._capture_and_detect(rect, save=False)
@@ -338,16 +382,23 @@ class BotEngine(QObject):
             logger.info(f"[轮{round_num}] 场景={scene.value} | {det_summary}")
             self._emit_annotated(cv_image, detections)
 
+            # 再次检查停止信号（在执行操作前）
+            if self.popup.stopped:
+                logger.info("收到停止/暂停信号，中断当前操作")
+                result["success"] = True
+                break
+
             action_desc = None
 
             # ---- P-1 异常处理 ----
             if scene == Scene.LEVEL_UP:
                 action_desc = self.popup.handle_popup(detections)
-                self.config.planting.player_level += 1
-                self.config.save()
-                new_level = self.config.planting.player_level
-                self.log_message.emit(f"升级! Lv.{new_level - 1} → Lv.{new_level}")
-                self.log_message.emit(f"当前种植: {self._resolve_crop_name()}")
+                if not self.popup.stopped:
+                    self.config.planting.player_level += 1
+                    self.config.save()
+                    new_level = self.config.planting.player_level
+                    self.log_message.emit(f"升级! Lv.{new_level - 1} → Lv.{new_level}")
+                    self.log_message.emit(f"当前种植: {self._resolve_crop_name()}")
             elif scene == Scene.POPUP:
                 action_desc = self.popup.handle_popup(detections)
             elif scene == Scene.BUY_CONFIRM:
@@ -361,33 +412,46 @@ class BotEngine(QObject):
             # ---- 农场主页操作 ----
             elif scene == Scene.FARM_OVERVIEW:
                 # P0 收益：一键收获
-                if not action_desc and features.get("auto_harvest", True):
+                if not action_desc and not self.popup.stopped and features.get("auto_harvest", True):
                     action_desc = self.harvest.try_harvest(detections)
 
                 # P1 维护：除草/除虫/浇水
-                if not action_desc:
+                if not action_desc and not self.popup.stopped:
                     action_desc = self.maintain.try_maintain(detections, features)
 
                 # P2 生产：播种
-                if not action_desc and features.get("auto_plant", True):
-                    pa = self.plant.plant_all(rect, self._resolve_crop_name(), buy_qty)
+                if not action_desc and not self.popup.stopped and features.get("auto_plant", True):
+                    crop_name = self._resolve_crop_name()
+                    # 检查是否有空地
+                    has_empty_land = any(d.name.startswith("land_empty") for d in detections)
+                    if has_empty_land:
+                        # 只在有空地时输出策略日志
+                        planting = self.config.planting
+                        if planting.strategy == PlantMode.BEST_EXP_RATE:
+                            best = get_best_crop_for_level(planting.player_level)
+                            if best:
+                                logger.info(f"播种策略: {best[0]} (经验效率 {best[4]/best[3]:.4f}/秒)")
+                        else:
+                            logger.info(f"播种策略: 手动指定 {crop_name}")
+                    
+                    pa = self.plant.plant_all(rect, crop_name, buy_qty)
                     if pa:
                         result["actions_done"].extend(pa)
                         action_desc = pa[-1]
 
                 # P3 资源：扩建
-                if not action_desc and features.get("auto_upgrade", True):
+                if not action_desc and not self.popup.stopped and features.get("auto_upgrade", True):
                     action_desc = self.expand.try_expand(rect, detections)
 
                 # P3.5 任务：领取奖励 / 售卖果实
-                if not action_desc and features.get("auto_task", True):
+                if not action_desc and not self.popup.stopped and features.get("auto_task", True):
                     ta = self.task.try_task(rect, detections)
                     if ta:
                         result["actions_done"].extend(ta)
                         action_desc = ta[-1]
 
                 # P4 社交：好友求助
-                if not action_desc and features.get("auto_help", True):
+                if not action_desc and not self.popup.stopped and features.get("auto_help", True):
                     fa = self.friend.try_friend_help(rect, detections)
                     if fa:
                         result["actions_done"].extend(fa)
@@ -395,22 +459,25 @@ class BotEngine(QObject):
 
             # ---- 好友家园 ----
             elif scene == Scene.FRIEND_FARM:
-                fa = self.friend._help_in_friend_farm(rect)
-                if fa:
-                    result["actions_done"].extend(fa)
-                    action_desc = fa[-1]
+                if not self.popup.stopped:
+                    fa = self.friend._help_in_friend_farm(rect)
+                    if fa:
+                        result["actions_done"].extend(fa)
+                        action_desc = fa[-1]
 
             elif scene == Scene.SEED_SELECT:
-                crop_name = self._resolve_crop_name()
-                seed = self.popup.find_by_name(detections, f"seed_{crop_name}")
-                if seed:
-                    self.popup.click(seed.x, seed.y, f"播种{crop_name}", ActionType.PLANT)
-                    self._record_stat(ActionType.PLANT)
-                    action_desc = f"播种{crop_name}"
+                if not self.popup.stopped:
+                    crop_name = self._resolve_crop_name()
+                    seed = self.popup.find_by_name(detections, f"seed_{crop_name}")
+                    if seed:
+                        self.popup.click(seed.x, seed.y, f"播种{crop_name}", ActionType.PLANT)
+                        self._record_stat(ActionType.PLANT)
+                        action_desc = f"播种{crop_name}"
 
             elif scene == Scene.UNKNOWN:
-                self.popup.click_blank(rect)
-                action_desc = "点击空白处"
+                if not self.popup.stopped:
+                    self.popup.click_blank(rect)
+                    action_desc = "点击空白处"
 
             # ---- 结果处理 ----
             if action_desc:
@@ -418,33 +485,88 @@ class BotEngine(QObject):
                 idle_rounds = 0
             else:
                 idle_rounds += 1
-                if idle_rounds == 1:
+                if idle_rounds == 1 and not self.popup.stopped:
                     self.popup.click_blank(rect)
                 elif idle_rounds >= max_idle:
                     break
 
+            # 检查停止信号（在延迟前）
+            if self.popup.stopped:
+                logger.info("收到停止/暂停信号，中断当前操作")
+                result["success"] = True
+                break
+
             time.sleep(0.3)
 
         # 设置下次检查间隔
-        # 有播种操作 → 5分钟后检查维护（除虫/除草/浇水）
-        # 无播种操作 → 30秒后再检查（可能有新状态）
+        # 始终使用配置的间隔，保持稳定的检查节奏
+        interval = self.config.schedule.farm_check_minutes * 60
+        result["next_check_seconds"] = interval
+        
+        # 如果播种了作物，记录日志
         has_planted = any("播种" in a for a in result.get("actions_done", []))
         if has_planted:
-            interval = self.config.schedule.farm_check_minutes * 60
-            result["next_check_seconds"] = interval
             crop_name = self._resolve_crop_name()
             crop = get_crop_by_name(crop_name)
             if crop:
                 grow_time = crop[3]
-                logger.info(f"已播种{crop_name}，{format_grow_time(grow_time)}后成熟，每{self.config.schedule.farm_check_minutes}分钟检查维护")
-        else:
-            result["next_check_seconds"] = 30
+                logger.info(f"已播种{crop_name}，{format_grow_time(grow_time)}后成熟")
+        
+        if not result["actions_done"]:
+            logger.debug("本轮无操作，作物生长中")
 
         result["success"] = True
         self.screen_capture.cleanup_old_screenshots(0)
         return result
 
+    # ============================================================
+    # 好友检查
+    # ============================================================
+
     def check_friends(self) -> dict:
-        result = {"success": True, "actions_done": [], "next_check_seconds": 1800}
-        logger.info("好友巡查功能开发中...")
+        """好友巡查：检测好友求助按钮并进入帮忙"""
+        result = {"success": False, "actions_done": [], "next_check_seconds": 1800}
+        
+        rect = self._prepare_window()
+        if not rect:
+            result["message"] = "窗口未找到"
+            return result
+
+        logger.info("开始好友巡查...")
+        
+        # 清屏：确保在农场主页
+        self._clear_screen(rect)
+        time.sleep(0.5)
+        
+        # 截屏检测
+        cv_image, detections, _ = self._capture_and_detect(rect, prefix="friend", save=False)
+        if cv_image is None:
+            result["message"] = "截屏失败"
+            return result
+        
+        scene = identify_scene(detections, self.cv_detector, cv_image)
+        logger.info(f"好友巡查: 当前场景={scene.value}")
+        
+        # 调试：列出所有检测到的按钮
+        button_dets = [d for d in detections if d.category == "button"]
+        logger.info(f"好友巡查: 检测到 {len(button_dets)} 个按钮: {[f'{d.name}({d.confidence:.0%})' for d in button_dets]}")
+        
+        # 检测好友求助按钮
+        if scene == Scene.FARM_OVERVIEW:
+            if self.config.features.auto_help:
+                fa = self.friend.try_friend_help(rect, detections)
+                if fa:
+                    result["actions_done"].extend(fa)
+                    result["success"] = True
+                    logger.info(f"好友巡查完成: {', '.join(fa)}")
+                else:
+                    logger.info("好友巡查: 未检测到好友求助")
+                    result["success"] = True
+            else:
+                logger.info("好友巡查: 自动帮忙功能已关闭")
+                result["success"] = True
+        else:
+            logger.warning(f"好友巡查: 当前不在农场主页 (场景={scene.value})")
+            result["message"] = "不在农场主页"
+        
         return result

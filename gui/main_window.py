@@ -102,7 +102,7 @@ class MainWindow(QMainWindow):
         keyboard.add_hotkey("F10", self._on_stop)
 
     def _init_ui(self):
-        self.setWindowTitle("QQ Farm Vision Bot")
+        self.setWindowTitle("QQ Farm Auto")
         self.setMinimumSize(960, 680)
         self.resize(1060, 740)
         self.setStyleSheet(STYLESHEET)

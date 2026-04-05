@@ -93,21 +93,18 @@ class SettingsPanel(QWidget):
         mf.setSpacing(5)
         self._window_keyword = QLineEdit()
         mf.addRow("窗口关键词:", self._window_keyword)
+        
         row_sched = QHBoxLayout()
         self._farm_interval = QSpinBox()
         self._farm_interval.setRange(1, 120)
         self._farm_interval.setSuffix("分")
         self._farm_interval.setFixedWidth(80)
-        row_sched.addWidget(QLabel("农场"))
+        row_sched.addWidget(QLabel("检查间隔"))
         row_sched.addWidget(self._farm_interval)
-        self._friend_interval = QSpinBox()
-        self._friend_interval.setRange(5, 180)
-        self._friend_interval.setSuffix("分")
-        self._friend_interval.setFixedWidth(80)
-        row_sched.addWidget(QLabel("好友"))
-        row_sched.addWidget(self._friend_interval)
+        row_sched.addWidget(QLabel("(包括农场+好友)"))
         row_sched.addStretch()
-        mf.addRow("检查间隔:", row_sched)
+        mf.addRow(row_sched)
+        
         misc_group.setLayout(mf)
         layout.addWidget(misc_group)
 
@@ -120,7 +117,6 @@ class SettingsPanel(QWidget):
         self._buy_quantity.valueChanged.connect(self._auto_save)
         self._window_keyword.editingFinished.connect(self._auto_save)
         self._farm_interval.valueChanged.connect(self._auto_save)
-        self._friend_interval.valueChanged.connect(self._auto_save)
         for cb in (self._cb_harvest, self._cb_plant, self._cb_water,
                    self._cb_weed, self._cb_bug, self._cb_sell,
                    self._cb_steal, self._cb_help, self._cb_task, self._cb_upgrade):
@@ -138,7 +134,6 @@ class SettingsPanel(QWidget):
             c.planting.preferred_crop = self._crop_names[idx]
         c.window_title_keyword = self._window_keyword.text().strip()
         c.schedule.farm_check_minutes = self._farm_interval.value()
-        c.schedule.friend_check_minutes = self._friend_interval.value()
         c.features.auto_harvest = self._cb_harvest.isChecked()
         c.features.auto_plant = self._cb_plant.isChecked()
         c.features.auto_water = self._cb_water.isChecked()
@@ -198,7 +193,6 @@ class SettingsPanel(QWidget):
         self._on_level_changed(c.planting.player_level)
         self._window_keyword.setText(c.window_title_keyword)
         self._farm_interval.setValue(c.schedule.farm_check_minutes)
-        self._friend_interval.setValue(c.schedule.friend_check_minutes)
         self._cb_harvest.setChecked(c.features.auto_harvest)
         self._cb_plant.setChecked(c.features.auto_plant)
         self._cb_water.setChecked(c.features.auto_water)
@@ -209,3 +203,4 @@ class SettingsPanel(QWidget):
         self._cb_help.setChecked(c.features.auto_help)
         self._cb_task.setChecked(c.features.auto_task)
         self._cb_upgrade.setChecked(c.features.auto_upgrade)
+

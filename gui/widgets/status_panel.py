@@ -64,6 +64,6 @@ class StatusPanel(QWidget):
         self._labels["state"].setStyleSheet(
             f"color: {color}; font-size: 12px; font-weight: bold;")
         self._labels["elapsed"].setText(stats.get("elapsed", "--"))
-        self._labels["next_farm"].setText(stats.get("next_farm_check", "--"))
+        self._labels["next_farm"].setText(stats.get("next_check", "--"))
         for key in ("harvest", "plant", "water", "weed", "bug", "sell"):
             self._labels[key].setText(str(stats.get(key, 0)))

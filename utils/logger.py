@@ -29,9 +29,10 @@ def setup_logger(log_dir: str = "logs"):
     os.makedirs(log_dir, exist_ok=True)
 
     logger.remove()
-    # 控制台输出
-    logger.add(sys.stderr, level="DEBUG",
-               format="<green>{time:HH:mm:ss}</green> | <level>{level:<7}</level> | {message}")
+    # 控制台输出（打包exe后sys.stderr为None，跳过）
+    if sys.stderr is not None:
+        logger.add(sys.stderr, level="DEBUG",
+                   format="<green>{time:HH:mm:ss}</green> | <level>{level:<7}</level> | {message}")
     # 文件输出
     logger.add(f"{log_dir}/bot_{{time:YYYY-MM-DD}}.log",
                rotation="00:00", retention="7 days", level="DEBUG",
